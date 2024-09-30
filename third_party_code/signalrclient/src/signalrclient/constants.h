@@ -1,10 +1,10 @@
-// Licensed to the .NET Foundation under one or more agreements.
-// The .NET Foundation licenses this file to you under the MIT license.
-// See the LICENSE file in the project root for more information.
+// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 #pragma once
 
-#define SIGNALR_VERSION "0.1.0-alpha0"
-#define USER_AGENT "SignalR.Client.Cpp/" SIGNALR_VERSION
-#define MAX_NEGOTIATE_REDIRECTS 100
-#define PROTOCOL "1.4"
+#include "cpprest/details/basic_types.h"
+
+#define SIGNALR_VERSION _XPLATSTR("1.0.0-beta2")
+#define PROTOCOL _XPLATSTR("1.4")
+#define USER_AGENT _XPLATSTR("SignalR.Client.Cpp/") SIGNALR_VERSION

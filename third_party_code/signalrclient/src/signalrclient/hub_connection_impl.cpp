@@ -1,628 +1,367 @@
-// Licensed to the .NET Foundation under one or more agreements.
-// The .NET Foundation licenses this file to you under the MIT license.
-// See the LICENSE file in the project root for more information.
+// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 #include "stdafx.h"
 #include "hub_connection_impl.h"
 #include "signalrclient/hub_exception.h"
 #include "trace_log_writer.h"
+#include "make_unique.h"
 #include "signalrclient/signalr_exception.h"
-#include "json_hub_protocol.h"
-#include "message_type.h"
-#include "handshake_protocol.h"
-#include "signalrclient/websocket_client.h"
-#include "signalr_default_scheduler.h"
-#include "json.hpp"
-#include "json_helpers.h"
 
 namespace signalr
 {
     // unnamed namespace makes it invisble outside this translation unit
     namespace
     {
-        static std::function<void(const char *, const signalr::value &)> create_hub_invocation_callback(const logger &logger,
-                                                                                                        const std::function<void(const signalr::value &)> &set_result,
-                                                                                                        const std::function<void(const std::exception_ptr e)> &set_exception);
+        static std::function<void(const json::value&)> create_hub_invocation_callback(const logger& logger,
+            const std::function<void(const json::value&)>& set_result,
+            const std::function<void(const std::exception_ptr e)>& set_exception,
+            const std::function<void(const json::value&)>& on_progress);
+
+        static utility::string_t adapt_url(const utility::string_t& url, bool use_default_url);
     }
 
-    std::shared_ptr<hub_connection_impl> hub_connection_impl::create(const std::string &url, std::unique_ptr<hub_protocol> &&hub_protocol,
-                                                                     trace_level trace_level, const std::shared_ptr<log_writer> &log_writer, std::function<std::shared_ptr<http_client>(const signalr_client_config &)> http_client_factory,
-                                                                     std::function<std::shared_ptr<websocket_client>(const signalr_client_config &)> websocket_factory, const std::string &query_string, const bool skip_negotiation)
+    std::shared_ptr<hub_connection_impl> hub_connection_impl::create(const utility::string_t& url, const utility::string_t& query_string,
+        trace_level trace_level, const std::shared_ptr<log_writer>& log_writer, bool use_default_url)
     {
-        auto connection = std::shared_ptr<hub_connection_impl>(new hub_connection_impl(url, std::move(hub_protocol),
-                                                                                       trace_level, log_writer, http_client_factory, websocket_factory, query_string, skip_negotiation));
+        return hub_connection_impl::create(url, query_string, trace_level, log_writer, use_default_url,
+            std::make_unique<web_request_factory>(), std::make_unique<transport_factory>());
+    }
+
+    std::shared_ptr<hub_connection_impl> hub_connection_impl::create(const utility::string_t& url, const utility::string_t& query_string,
+        trace_level trace_level, const std::shared_ptr<log_writer>& log_writer, bool use_default_url,
+        std::unique_ptr<web_request_factory> web_request_factory, std::unique_ptr<transport_factory> transport_factory)
+    {
+        auto connection = std::shared_ptr<hub_connection_impl>(new hub_connection_impl(url, query_string, trace_level,
+            log_writer ? log_writer : std::make_shared<trace_log_writer>(), use_default_url,
+            std::move(web_request_factory), std::move(transport_factory)));
 
         connection->initialize();
 
         return connection;
     }
 
-    hub_connection_impl::hub_connection_impl(const std::string &url, std::unique_ptr<hub_protocol> &&hub_protocol, trace_level trace_level,
-                                             const std::shared_ptr<log_writer> &log_writer, std::function<std::shared_ptr<http_client>(const signalr_client_config &)> http_client_factory,
-                                             std::function<std::shared_ptr<websocket_client>(const signalr_client_config &)> websocket_factory, const std::string &hub_name, const bool skip_negotiation)
-        : m_connection(connection_impl::create(url, trace_level, log_writer, http_client_factory, websocket_factory, hub_name, skip_negotiation)), m_logger(log_writer, trace_level),
-          m_callback_manager("connection went out of scope before invocation result was received"),
-          m_handshakeReceived(false), m_disconnected([](std::exception_ptr) noexcept {}), m_protocol(std::move(hub_protocol))
-    {
-        hub_message ping_msg(signalr::message_type::ping);
-        m_cached_ping = m_protocol->write_message(&ping_msg);
-    }
+    hub_connection_impl::hub_connection_impl(const utility::string_t& url, const utility::string_t& query_string, trace_level trace_level,
+        const std::shared_ptr<log_writer>& log_writer, bool use_default_url, std::unique_ptr<web_request_factory> web_request_factory,
+        std::unique_ptr<transport_factory> transport_factory)
+        : m_connection(connection_impl::create(adapt_url(url, use_default_url), query_string, trace_level, log_writer,
+        std::move(web_request_factory), std::move(transport_factory))),m_logger(log_writer, trace_level),
+        m_callback_manager(json::value::parse(_XPLATSTR("{ \"E\" : \"connection went out of scope before invocation result was received\"}")))
+    { }
 
     void hub_connection_impl::initialize()
     {
+        auto this_hub_connection = shared_from_this();
+
         // weak_ptr prevents a circular dependency leading to memory leak and other problems
-        std::weak_ptr<hub_connection_impl> weak_hub_connection = shared_from_this();
+        auto weak_hub_connection = std::weak_ptr<hub_connection_impl>(this_hub_connection);
 
-        m_connection->set_message_received([weak_hub_connection](std::string &&message)
-                                           {
+        m_connection->set_message_received_json([weak_hub_connection](const web::json::value& message)
+        {
             auto connection = weak_hub_connection.lock();
             if (connection)
             {
-                connection->process_message(std::move(message));
-            } });
+                connection->process_message(message);
+            }
+        });
 
-        m_connection->set_disconnected([weak_hub_connection](std::exception_ptr exception)
-                                       {
-            auto connection = weak_hub_connection.lock();
-            if (connection)
-            {
-                // start may be waiting on the handshake response so we complete it here, this no-ops if already set
-                connection->m_handshakeTask->set(std::make_exception_ptr(signalr_exception("connection closed while handshake was in progress.")));
-                try
-                {
-                    connection->m_disconnect_cts->cancel();
-                }
-                catch (const std::exception& ex)
-                {
-                    if (connection->m_logger.is_enabled(trace_level::warning))
-                    {
-                        connection->m_logger.log(trace_level::warning, std::string("disconnect event threw an exception during connection closure: ")
-                            .append(ex.what()));
-                    }
-                }
-
-                connection->m_callback_manager.clear("connection was stopped before invocation result was received");
-
-                connection->m_disconnected(exception);
-            } });
+        set_reconnecting([](){});
     }
 
-    void hub_connection_impl::on(const std::string &event_name, const std::function<void(const std::vector<signalr::value> &)> &handler)
+    std::shared_ptr<internal_hub_proxy> hub_connection_impl::create_hub_proxy(const utility::string_t& hub_name)
     {
-        if (event_name.length() == 0)
+        if (hub_name.length() == 0)
         {
-            throw std::invalid_argument("event_name cannot be empty");
+            throw std::invalid_argument("hub name cannot be empty");
+        }
+
+        if (get_connection_state() != connection_state::disconnected)
+        {
+            throw signalr_exception(_XPLATSTR("hub proxies cannot be created when the connection is not in the disconnected state"));
+        }
+
+        auto iter = m_proxies.find(hub_name);
+        if (iter != m_proxies.end())
+        {
+            return iter->second;
         }
 
         auto weak_connection = std::weak_ptr<hub_connection_impl>(shared_from_this());
-        auto connection = weak_connection.lock();
-        if (connection && connection->get_connection_state() != connection_state::disconnected)
-        {
-            throw signalr_exception("can't register a handler if the connection is not in a disconnected state");
-        }
-
-        if (m_subscriptions.find(event_name) != m_subscriptions.end())
-        {
-            throw signalr_exception(
-                "an action for this event has already been registered. event name: " + event_name);
-        }
-
-        m_subscriptions.insert({event_name, handler});
+        auto proxy = std::make_shared<internal_hub_proxy>(weak_connection, hub_name, m_logger);
+        m_proxies.insert(std::make_pair(hub_name, proxy));
+        return proxy;
     }
 
-    void hub_connection_impl::start(std::function<void(std::exception_ptr)> callback) noexcept
+    pplx::task<void> hub_connection_impl::start()
     {
-        if (m_connection->get_connection_state() != connection_state::disconnected)
+        if (m_proxies.size() > 0)
         {
-            callback(std::make_exception_ptr(signalr_exception(
-                "the connection can only be started if it is in the disconnected state")));
-            return;
-        }
+            json::value connection_data;
 
-        m_connection->set_client_config(m_signalr_client_config);
-        m_handshakeTask = std::make_shared<completion_event>();
-        m_disconnect_cts = std::make_shared<cancellation_token_source>();
-        m_handshakeReceived = false;
-        std::weak_ptr<hub_connection_impl> weak_connection = shared_from_this();
-        m_connection->start([weak_connection, callback](std::exception_ptr start_exception)
-                            {
-                auto connection = weak_connection.lock();
-                if (!connection)
-                {
-                    // The connection has been destructed
-                    callback(std::make_exception_ptr(signalr_exception("the hub connection has been deconstructed")));
-                    return;
-                }
-
-                if (start_exception)
-                {
-                    assert(connection->get_connection_state() == connection_state::disconnected);
-                    // connection didn't start, don't call stop
-                    callback(start_exception);
-                    return;
-                }
-
-                std::shared_ptr<std::mutex> handshake_request_lock = std::make_shared<std::mutex>();
-                std::shared_ptr<bool> handshake_request_done = std::make_shared<bool>();
-
-                auto handle_handshake = [weak_connection, handshake_request_done, handshake_request_lock, callback](std::exception_ptr exception, bool fromSend)
-                {
-                    assert(fromSend ? *handshake_request_done : true);
-
-                    auto connection = weak_connection.lock();
-                    if (!connection)
-                    {
-                        // The connection has been destructed
-                        callback(std::make_exception_ptr(signalr_exception("the hub connection has been deconstructed")));
-                        return;
-                    }
-
-                    {
-                        std::lock_guard<std::mutex> lock(*handshake_request_lock);
-                        // connection.send will be waiting on the handshake task which has been set by the caller already
-                        if (!fromSend && *handshake_request_done == true)
-                        {
-                            return;
-                        }
-                        *handshake_request_done = true;
-                    }
-
-                    try
-                    {
-                        if (exception == nullptr)
-                        {
-                            connection->m_handshakeTask->get();
-                            callback(nullptr);
-                        }
-                    }
-                    catch (...)
-                    {
-                        exception = std::current_exception();
-                    }
-
-                    if (exception != nullptr)
-                    {
-                        connection->m_connection->stop([callback, exception](std::exception_ptr)
-                            {
-                                callback(exception);
-                            }, exception);
-                    }
-                    else
-                    {
-                        connection->start_keepalive();
-                    }
-                };
-
-                auto handshake_request = handshake::write_handshake(connection->m_protocol);
-                auto handshake_task = connection->m_handshakeTask;
-                auto handshake_timeout = connection->m_signalr_client_config.get_handshake_timeout();
-
-                connection->m_disconnect_cts->register_callback([handle_handshake, handshake_request_lock, handshake_request_done]()
-                    {
-                        {
-                            std::lock_guard<std::mutex> lock(*handshake_request_lock);
-                            // no op after connection.send returned, m_handshakeTask should be set before m_disconnect_cts is canceled
-                            if (*handshake_request_done == true)
-                            {
-                                return;
-                            }
-                        }
-
-                        // if the request isn't completed then no one is waiting on the handshake task
-                        // so we need to run the callback here instead of relying on connection.send completing
-                        // handshake_request_done is set in handle_handshake, don't set it here
-                        handle_handshake(nullptr, false);
-                    });
-
-                timer(connection->m_signalr_client_config.get_scheduler(),
-                    [handle_handshake, handshake_task, handshake_timeout, handshake_request_lock](std::chrono::milliseconds duration)
-                    {
-                        {
-                            std::lock_guard<std::mutex> lock(*handshake_request_lock);
-
-                            // if the task is set then connection.send is either already waiting on the handshake or has completed,
-                            // or stop has been called and will be handling the callback
-                            if (handshake_task->is_set())
-                            {
-                                return true;
-                            }
-
-                            if (duration < handshake_timeout)
-                            {
-                                return false;
-                            }
-                        }
-
-                        auto exception = std::make_exception_ptr(signalr_exception("timed out waiting for the server to respond to the handshake message."));
-                        // unblocks connection.send if it's waiting on the task
-                        handshake_task->set(exception);
-
-                        handle_handshake(exception, false);
-                        return true;
-                    });
-
-                connection->m_connection->send(handshake_request, connection->m_protocol->transfer_format(),
-                    [handle_handshake, handshake_request_done, handshake_request_lock](std::exception_ptr exception)
-                {
-                    {
-                        std::lock_guard<std::mutex> lock(*handshake_request_lock);
-                        if (*handshake_request_done == true)
-                        {
-                            // callback ran from timer or cancellation token, nothing to do here
-                            return;
-                        }
-
-                        // indicates that the handshake timer doesn't need to call the callback, it just needs to set the timeout exception
-                        // handle_handshake will be waiting on the handshake completion (error or success) to call the callback
-                        *handshake_request_done = true;
-                    }
-
-                    handle_handshake(exception, true);
-                }); });
-    }
-
-    void hub_connection_impl::stop(std::function<void(std::exception_ptr)> callback, bool is_dtor) noexcept
-    {
-        if (get_connection_state() == connection_state::disconnected)
-        {
-            // don't log if already disconnected and stop called from dtor, it's just noise
-            if (!is_dtor)
+            auto index = 0;
+            for (auto kvp : m_proxies)
             {
-                m_logger.log(trace_level::debug, "stop ignored because the connection is already disconnected.");
+                json::value hub;
+                hub[_XPLATSTR("Name")] = json::value::string(kvp.first);
+
+                connection_data[index++] = hub;
             }
-            callback(nullptr);
-            return;
+
+            m_connection->set_connection_data(connection_data.serialize());
         }
         else
         {
-            {
-                std::lock_guard<std::mutex> lock(m_stop_callback_lock);
-                m_stop_callbacks.push_back(callback);
+            m_logger.log(trace_level::info, _XPLATSTR("no hub proxies exist for this hub connection"));
+        }
 
-                if (m_stop_callbacks.size() > 1)
+        return m_connection->start();
+    }
+
+    pplx::task<void> hub_connection_impl::stop()
+    {
+        m_callback_manager.clear(json::value::parse(_XPLATSTR("{ \"E\" : \"connection was stopped before invocation result was received\"}")));
+        return m_connection->stop();
+    }
+
+    void hub_connection_impl::process_message(const web::json::value& message)
+    {
+        if (message.is_object())
+        {
+            // note this handles both - invocation returns and progress updates
+            if (message.has_field(_XPLATSTR("I")))
+            {
+                if (invoke_callback(message))
                 {
-                    m_logger.log(trace_level::info, "Stop is already in progress, waiting for it to finish.");
-                    // we already registered the callback
-                    // so we can just return now as the in-progress stop will trigger the callback when it completes
                     return;
                 }
             }
-            std::weak_ptr<hub_connection_impl> weak_connection = shared_from_this();
-            m_connection->stop([weak_connection](std::exception_ptr exception)
-                               {
-                    auto connection = weak_connection.lock();
-                    if (!connection)
-                    {
-                        return;
-                    }
 
-                    assert(connection->get_connection_state() == connection_state::disconnected);
+            if (message.has_field(_XPLATSTR("H")) && message.has_field(_XPLATSTR("M")) && message.has_field(_XPLATSTR("A")))
+            {
+                auto hub_name = message.at(_XPLATSTR("H")).as_string();
+                auto method = message.at(_XPLATSTR("M")).as_string();
+                auto iter = m_proxies.find(hub_name);
+                if (iter != m_proxies.end())
+                {
+                    iter->second->invoke_event(method, message.at(_XPLATSTR("A")));
+                }
+                else
+                {
+                    m_logger.log(trace_level::info,
+                        utility::string_t(_XPLATSTR("no proxy found for hub invocation. hub: "))
+                        .append(hub_name).append(_XPLATSTR(", method: ")).append(method));
+                }
 
-                    std::vector<std::function<void(std::exception_ptr)>> callbacks;
-
-                    {
-                        std::lock_guard<std::mutex> lock(connection->m_stop_callback_lock);
-                        // copy the callbacks out and clear the list inside the lock
-                        // then run the callbacks outside of the lock
-                        callbacks = connection->m_stop_callbacks;
-                        connection->m_stop_callbacks.clear();
-                    }
-
-                    for (auto& callback : callbacks)
-                    {
-                        callback(exception);
-                    } },
-                               nullptr);
+                return;
+            }
         }
+
+        m_logger.log(trace_level::info, utility::string_t(_XPLATSTR("non-hub message received and will be discarded. message: "))
+            .append(message.serialize()));
     }
 
-    void hub_connection_impl::process_message(std::string &&response)
+    bool hub_connection_impl::invoke_callback(const web::json::value& message)
     {
-        try
+        auto is_progress = message.has_field(_XPLATSTR("P"));
+        auto id_source = is_progress ? message.at(_XPLATSTR("P")) : message;
+        if (id_source.has_field(_XPLATSTR("I")) && id_source.at(_XPLATSTR("I")).is_string())
         {
-            auto j = nlohmann::json::parse(response);
-            if (j.is_object())
+            auto callback_id = id_source.at(_XPLATSTR("I")).as_string();
+
+            // callbacks must not be removed for progress updates
+            if (!m_callback_manager.invoke_callback(callback_id, message, /*remove_callback*/ !is_progress))
             {
-                if (j.contains("I"))
+                m_logger.log(trace_level::info, utility::string_t(_XPLATSTR("no callback found for id: ")).append(callback_id));
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    pplx::task<json::value> hub_connection_impl::invoke_json(const utility::string_t& hub_name, const utility::string_t& method_name,
+        const json::value& arguments, const std::function<void(const json::value&)>& on_progress)
+    {
+        _ASSERTE(arguments.is_array());
+
+        pplx::task_completion_event<json::value> tce;
+
+        const auto callback_id = m_callback_manager.register_callback(
+            create_hub_invocation_callback(m_logger, [tce](const json::value& result) { tce.set(result); },
+                [tce](const std::exception_ptr e) { tce.set_exception(e); }, on_progress));
+
+        invoke_hub_method(hub_name, method_name, arguments, callback_id,
+            [tce](const std::exception_ptr e){tce.set_exception(e); });
+
+        return pplx::create_task(tce);
+    }
+
+    pplx::task<void> hub_connection_impl::invoke_void(const utility::string_t& hub_name, const utility::string_t& method_name,
+        const json::value& arguments, const std::function<void(const json::value&)>& on_progress)
+    {
+        _ASSERTE(arguments.is_array());
+
+        pplx::task_completion_event<void> tce;
+
+        const auto callback_id = m_callback_manager.register_callback(
+            create_hub_invocation_callback(m_logger, [tce](const json::value&) { tce.set(); },
+            [tce](const std::exception_ptr e){ tce.set_exception(e); }, on_progress));
+
+        invoke_hub_method(hub_name, method_name, arguments, callback_id,
+            [tce](const std::exception_ptr e){tce.set_exception(e); });
+
+        return pplx::create_task(tce);
+    }
+
+    void hub_connection_impl::invoke_hub_method(const utility::string_t& hub_name, const utility::string_t& method_name,
+        const json::value& arguments, const utility::string_t& callback_id, std::function<void(const std::exception_ptr)> set_exception)
+    {
+        json::value request;
+        request[_XPLATSTR("H")] = json::value::string(hub_name);
+        request[_XPLATSTR("M")] = json::value::string(method_name);
+        request[_XPLATSTR("A")] = arguments;
+        request[_XPLATSTR("I")] = json::value::string(callback_id);
+
+        auto this_hub_connection = shared_from_this();
+
+        // weak_ptr prevents a circular dependency leading to memory leak and other problems
+        auto weak_hub_connection = std::weak_ptr<hub_connection_impl>(this_hub_connection);
+
+        m_connection->send(request.serialize())
+            .then([set_exception, weak_hub_connection, callback_id](pplx::task<void> send_task)
+            {
+                try
                 {
-                    auto is_process = j.contains("P");
-                    auto id_source = is_process ? j.at("P") : j;
-                    if (id_source.contains("I") && id_source.at("I").is_string())
+                    send_task.get();
+                }
+                catch (const std::exception&)
+                {
+                    set_exception(std::current_exception());
+                    auto hub_connection = weak_hub_connection.lock();
+                    if (hub_connection)
                     {
-                        auto callback_id = id_source.at("I").get<std::string>();
-                        if (!m_callback_manager.invoke_callback(callback_id, "", response, true))
-                        {
-                            if (m_logger.is_enabled(trace_level::info))
-                            {
-                                m_logger.log(trace_level::info, std::string("no callback found for id: ").append(callback_id));
-                            }
-                        }
-                        return;
+                        hub_connection->m_callback_manager.remove_callback(callback_id);
                     }
                 }
-                if (j.contains("M") && j.at("M").is_array())
-                {
-                    for (auto &message : j.at("M"))
-                    {
-                        if (message.contains("H") && message.contains("M") && message.contains("A"))
-                        {
-                            auto hub_name = message.at("H").get<std::string>();
-                            auto method = message.at("M").get<std::string>();
-                            auto event = m_subscriptions.find(method);
-                            std::vector<signalr::value> args;
-                            args.push_back(createValue(message.at("A")));
-                            if (event != m_subscriptions.end())
-                            {
-                                event->second(args);
-                            }
-                            else
-                            {
-                                m_logger.log(trace_level::info, "handler not found");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        catch (const std::exception &e)
-        {
-            if (m_logger.is_enabled(trace_level::error))
-            {
-                m_logger.log(trace_level::error, std::string("error occurred when parsing response: ")
-                                                     .append(e.what())
-                                                     .append(". response: ")
-                                                     .append(response));
-            }
-
-            // TODO: Consider passing "reason" exception to stop
-            m_connection->stop([](std::exception_ptr) {}, std::current_exception());
-        }
+            });
     }
 
-    bool hub_connection_impl::invoke_callback(completion_message *completion)
-    {
-        const char *error = nullptr;
-        if (!completion->error.empty())
-        {
-            error = completion->error.data();
-        }
-
-        // TODO: consider transferring ownership of 'result' so that if we run user callbacks on a different thread we don't need to
-        // worry about object lifetime
-        if (!m_callback_manager.invoke_callback(completion->invocation_id, error, completion->result, true))
-        {
-            if (m_logger.is_enabled(trace_level::info))
-            {
-                m_logger.log(trace_level::info, std::string("no callback found for id: ").append(completion->invocation_id));
-            }
-        }
-
-        return true;
-    }
-
-    void hub_connection_impl::invoke(const std::string &method_name, const std::vector<signalr::value> &arguments, std::function<void(const signalr::value &, std::exception_ptr)> callback) noexcept
-    {
-        const auto &callback_id = m_callback_manager.register_callback(
-            create_hub_invocation_callback(
-                m_logger, [callback](const signalr::value &result)
-                { callback(result, nullptr); },
-                [callback](const std::exception_ptr e)
-                { callback(signalr::value(), e); }));
-
-        invoke_hub_method(method_name, arguments, callback_id, nullptr,
-                          [callback](const std::exception_ptr e)
-                          { callback(signalr::value(), e); });
-    }
-
-    void hub_connection_impl::send(const std::string &method_name, const std::vector<signalr::value> &arguments, std::function<void(std::exception_ptr)> callback) noexcept
-    {
-        invoke_hub_method(
-            method_name, arguments, "",
-            [callback]()
-            { callback(nullptr); },
-            [callback](const std::exception_ptr e)
-            { callback(e); });
-    }
-
-    void hub_connection_impl::invoke_hub_method(const std::string &method_name, const std::vector<signalr::value> &arguments,
-                                                const std::string &callback_id, std::function<void()> set_completion, std::function<void(const std::exception_ptr)> set_exception) noexcept
-    {
-        try
-        {
-            invocation_message invocation(callback_id, method_name, arguments);
-            auto message = m_protocol->write_message(&invocation);
-
-            // weak_ptr prevents a circular dependency leading to memory leak and other problems
-            auto weak_hub_connection = std::weak_ptr<hub_connection_impl>(shared_from_this());
-
-            m_connection->send(message, m_protocol->transfer_format(), [set_completion, set_exception, weak_hub_connection, callback_id](std::exception_ptr exception)
-                               {
-                    if (exception)
-                    {
-                        auto hub_connection = weak_hub_connection.lock();
-                        if (hub_connection)
-                        {
-                            hub_connection->m_callback_manager.remove_callback(callback_id);
-                        }
-                        set_exception(exception);
-                    }
-                    else
-                    {
-                        if (callback_id.empty())
-                        {
-                            // complete nonBlocking call
-                            set_completion();
-                        }
-                    } });
-
-            reset_send_ping();
-        }
-        catch (const std::exception &e)
-        {
-            m_callback_manager.remove_callback(callback_id);
-            if (m_logger.is_enabled(trace_level::warning))
-            {
-                m_logger.log(trace_level::warning, std::string("failed to send invocation: ").append(e.what()));
-            }
-            set_exception(std::current_exception());
-        }
-    }
-
-    connection_state hub_connection_impl::get_connection_state() const noexcept
+    connection_state hub_connection_impl::get_connection_state() const
     {
         return m_connection->get_connection_state();
     }
 
-    std::string hub_connection_impl::get_connection_id() const
+    utility::string_t hub_connection_impl::get_connection_id() const
     {
         return m_connection->get_connection_id();
     }
 
-    void hub_connection_impl::set_client_config(const signalr_client_config &config)
+    utility::string_t hub_connection_impl::get_connection_token() const
     {
-        m_signalr_client_config = config;
+        return m_connection->get_connection_token();
+    }
+
+    void hub_connection_impl::set_client_config(const signalr_client_config& config)
+    {
         m_connection->set_client_config(config);
     }
 
-    void hub_connection_impl::set_disconnected(const std::function<void(std::exception_ptr)> &disconnected)
+    void hub_connection_impl::set_reconnecting(const std::function<void()>& reconnecting)
     {
-        m_disconnected = disconnected;
-    }
+        // weak_ptr prevents a circular dependency leading to memory leak and other problems
+        auto weak_hub_connection = std::weak_ptr<hub_connection_impl>(shared_from_this());
 
-    void hub_connection_impl::reset_send_ping()
-    {
-        auto timeMs = (std::chrono::steady_clock::now() + m_signalr_client_config.get_keepalive_interval()).time_since_epoch();
-        m_nextActivationSendPing.store(std::chrono::duration_cast<std::chrono::milliseconds>(timeMs).count());
-    }
-
-    void hub_connection_impl::reset_server_timeout()
-    {
-        auto timeMs = (std::chrono::steady_clock::now() + m_signalr_client_config.get_server_timeout()).time_since_epoch();
-        m_nextActivationServerTimeout.store(std::chrono::duration_cast<std::chrono::milliseconds>(timeMs).count());
-    }
-
-    void hub_connection_impl::start_keepalive()
-    {
-        if (m_logger.is_enabled(trace_level::debug))
+        m_connection->set_reconnecting([weak_hub_connection, reconnecting]()
         {
-            m_logger.log(trace_level::debug, "starting keep alive timer.");
-        }
-
-        auto send_ping = [](std::shared_ptr<hub_connection_impl> connection)
-        {
-            if (!connection)
+            auto hub_connection = weak_hub_connection.lock();
+            if (hub_connection)
             {
-                return;
+                hub_connection->m_callback_manager.clear(
+                    json::value::parse(_XPLATSTR("{ \"E\" : \"connection has been lost\"}")));
             }
 
-            if (connection->get_connection_state() != connection_state::connected)
-            {
-                return;
-            }
+            reconnecting();
+        });
+    }
 
-            try
-            {
-                std::weak_ptr<hub_connection_impl> weak_connection = connection;
-                connection->m_connection->send(
-                    connection->m_cached_ping,
-                    connection->m_protocol->transfer_format(), [weak_connection](std::exception_ptr exception)
-                    {
-                        auto connection = weak_connection.lock();
-                        if (connection)
-                        {
-                            if (exception)
-                            {
-                                if (connection->m_logger.is_enabled(trace_level::warning))
-                                {
-                                    connection->m_logger.log(trace_level::warning, "failed to send ping!");
-                                }
-                            }
-                            else
-                            {
-                                connection->reset_send_ping();
-                            }
-                        } });
-            }
-            catch (const std::exception &e)
-            {
-                if (connection->m_logger.is_enabled(trace_level::warning))
-                {
-                    connection->m_logger.log(trace_level::warning, std::string("failed to send ping: ").append(e.what()));
-                }
-            }
-        };
+    void hub_connection_impl::set_reconnected(const std::function<void()>& reconnected)
+    {
+        m_connection->set_reconnected(reconnected);
+    }
 
-        send_ping(shared_from_this());
-        reset_server_timeout();
-
-        std::weak_ptr<hub_connection_impl> weak_connection = shared_from_this();
-        timer(m_signalr_client_config.get_scheduler(),
-              [send_ping, weak_connection](std::chrono::milliseconds)
-              {
-                  auto connection = weak_connection.lock();
-
-                  if (!connection)
-                  {
-                      return true;
-                  }
-
-                  if (connection->get_connection_state() != connection_state::connected)
-                  {
-                      return true;
-                  }
-
-                  auto timeNowmSeconds =
-                      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-
-                  if (timeNowmSeconds > connection->m_nextActivationServerTimeout.load())
-                  {
-                      if (connection->get_connection_state() == connection_state::connected)
-                      {
-                          auto error_msg = std::string("server timeout (")
-                                               .append(std::to_string(connection->m_signalr_client_config.get_server_timeout().count()))
-                                               .append(" ms) elapsed without receiving a message from the server.");
-                          if (connection->m_logger.is_enabled(trace_level::warning))
-                          {
-                              connection->m_logger.log(trace_level::warning, error_msg);
-                          }
-
-                          connection->m_connection->stop([](std::exception_ptr) {}, std::make_exception_ptr(signalr_exception(error_msg)));
-                      }
-                  }
-
-                  if (timeNowmSeconds > connection->m_nextActivationSendPing.load())
-                  {
-                      if (connection->m_logger.is_enabled(trace_level::debug))
-                      {
-                          connection->m_logger.log(trace_level::debug, "sending ping to server.");
-                      }
-                      send_ping(connection);
-                  }
-
-                  return false;
-              });
+    void hub_connection_impl::set_disconnected(const std::function<void()>& disconnected)
+    {
+        m_connection->set_disconnected(disconnected);
     }
 
     // unnamed namespace makes it invisble outside this translation unit
     namespace
     {
-        static std::function<void(const char *error, const signalr::value &)> create_hub_invocation_callback(const logger &logger,
-                                                                                                             const std::function<void(const signalr::value &)> &set_result,
-                                                                                                             const std::function<void(const std::exception_ptr)> &set_exception)
+        static std::function<void(const json::value&)> create_hub_invocation_callback(const logger& logger,
+            const std::function<void(const json::value&)>& set_result,
+            const std::function<void(const std::exception_ptr)>& set_exception,
+            const std::function<void(const json::value&)>& on_progress)
         {
-            return [logger, set_result, set_exception](const char *error, const signalr::value &message)
+            return[logger, set_result, set_exception, on_progress](const json::value& message)
             {
-                if (error != nullptr)
+                if (message.has_field(_XPLATSTR("R")))
                 {
-                    set_exception(
-                        std::make_exception_ptr(
-                            hub_exception(error)));
+                    set_result(message.at(_XPLATSTR("R")));
+                    return;
                 }
-                else
+
+                if (message.has_field(_XPLATSTR("P")))
                 {
-                    set_result(message);
+                    auto progress_message = message.at(_XPLATSTR("P"));
+                    auto data = progress_message.has_field(_XPLATSTR("D"))
+                        ? progress_message.at(_XPLATSTR("D"))
+                        : json::value::null();
+
+                    on_progress(data);
+
+                    return;
                 }
+
+                if (message.has_field(_XPLATSTR("E")))
+                {
+                    if (message.has_field(_XPLATSTR("H")) && message.at(_XPLATSTR("H")).is_boolean() && message.at(_XPLATSTR("H")).as_bool())
+                    {
+                        set_exception(
+                            std::make_exception_ptr(
+                                hub_exception(
+                                    message.at(_XPLATSTR("E")).serialize(),
+                                    message.has_field(_XPLATSTR("D")) ? message.at(_XPLATSTR("D")): json::value())));
+                    }
+                    else
+                    {
+                        set_exception(
+                            std::make_exception_ptr(
+                               signalr_exception(message.at(_XPLATSTR("E")).serialize())));
+                    }
+
+                    return;
+                }
+
+                set_result(json::value::null());
             };
+        }
+
+        static utility::string_t adapt_url(const utility::string_t& url, bool use_default_url)
+        {
+            if (use_default_url)
+            {
+                auto new_url = url;
+                if (new_url.back() != _XPLATSTR('/'))
+                {
+                    new_url.append(_XPLATSTR("/"));
+                }
+                new_url.append(_XPLATSTR("signalr"));
+
+                return new_url;
+            }
+
+            return url;
         }
     }
 }

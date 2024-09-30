@@ -1,24 +1,22 @@
-// Licensed to the .NET Foundation under one or more agreements.
-// The .NET Foundation licenses this file to you under the MIT license.
-// See the LICENSE file in the project root for more information.
+// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 #pragma once
 
-#include <mutex>
 #include <atomic>
-#include "signalrclient/http_client.h"
+#include <mutex>
+#include "cpprest/http_client.h"
 #include "signalrclient/trace_level.h"
 #include "signalrclient/connection_state.h"
 #include "signalrclient/signalr_client_config.h"
+#include "web_request_factory.h"
 #include "transport_factory.h"
 #include "logger.h"
 #include "negotiation_response.h"
-#include "cancellation_token_source.h"
+#include "event.h"
 
 namespace signalr
 {
-    class websocket_client;
-
     // Note:
     // Factory methods and private constructors prevent from using this class incorrectly. Because this class
     // derives from `std::enable_shared_from_this` the instance has to be owned by a `std::shared_ptr` whenever
@@ -27,8 +25,11 @@ namespace signalr
     class connection_impl : public std::enable_shared_from_this<connection_impl>
     {
     public:
-        static std::shared_ptr<connection_impl> create(const std::string& url, trace_level trace_level, const std::shared_ptr<log_writer>& log_writer,
-            std::function<std::shared_ptr<http_client>(const signalr_client_config&)> http_client_factory, std::function<std::shared_ptr<websocket_client>(const signalr_client_config&)> websocket_factory, const std::string& connection_data, bool skip_negotiation = false);
+        static std::shared_ptr<connection_impl> create(const utility::string_t& url, const utility::string_t& query_string,
+            trace_level trace_level, const std::shared_ptr<log_writer>& log_writer);
+
+        static std::shared_ptr<connection_impl> create(const utility::string_t& url, const utility::string_t& query_string, trace_level trace_level,
+            const std::shared_ptr<log_writer>& log_writer, std::unique_ptr<web_request_factory> web_request_factory, std::unique_ptr<transport_factory> transport_factory);
 
         connection_impl(const connection_impl&) = delete;
 
@@ -36,61 +37,70 @@ namespace signalr
 
         ~connection_impl();
 
-        void start(std::function<void(std::exception_ptr)> callback) noexcept;
-        void send(const std::string &data, transfer_format transfer_format, std::function<void(std::exception_ptr)> callback) noexcept;
-        void stop(std::function<void(std::exception_ptr)> callback, std::exception_ptr exception) noexcept;
+        pplx::task<void> start();
+        pplx::task<void> send(const utility::string_t &data);
+        pplx::task<void> stop();
 
-        connection_state get_connection_state() const noexcept;
-        std::string get_connection_id() const noexcept;
+        connection_state get_connection_state() const;
+        utility::string_t get_connection_id() const;
+        utility::string_t get_connection_token() const;
 
-        void set_message_received(const std::function<void(std::string&&)>& message_received);
-        void set_disconnected(const std::function<void(std::exception_ptr)>& disconnected);
+        void set_message_received_string(const std::function<void(const utility::string_t&)>& message_received);
+        void set_message_received_json(const std::function<void(const web::json::value&)>& message_received);
+        void set_reconnecting(const std::function<void()>& reconnecting);
+        void set_reconnected(const std::function<void()>& reconnected);
+        void set_disconnected(const std::function<void()>& disconnected);
         void set_client_config(const signalr_client_config& config);
+        void set_reconnect_delay(const int reconnect_delay /*milliseconds*/);
+
+        void set_connection_data(const utility::string_t& connection_data);
 
     private:
-        std::shared_ptr<scheduler> m_scheduler;
-        std::string m_base_url;
-       
+        web::uri m_base_url;
+        utility::string_t m_query_string;
         std::atomic<connection_state> m_connection_state;
         logger m_logger;
         std::shared_ptr<transport> m_transport;
+        std::unique_ptr<web_request_factory> m_web_request_factory;
         std::unique_ptr<transport_factory> m_transport_factory;
-         std::string m_connection_data;
-        bool m_skip_negotiation;
 
-        std::exception_ptr m_stop_error;
-
-        std::function<void(std::string&&)> m_message_received;
-        std::function<void(std::exception_ptr)> m_disconnected;
+        std::function<void(const web::json::value&)> m_message_received;
+        std::function<void()> m_reconnecting;
+        std::function<void()> m_reconnected;
+        std::function<void()> m_disconnected;
         signalr_client_config m_signalr_client_config;
 
-        std::shared_ptr<cancellation_token_source> m_disconnect_cts;
+        pplx::cancellation_token_source m_disconnect_cts;
         std::mutex m_stop_lock;
-        cancellation_token_source m_start_completed_event;
-        std::string m_connection_id;
-        std::string m_connection_token;
-        std::function<std::shared_ptr<http_client>(const signalr_client_config&)> m_http_client_factory;
+        event m_start_completed_event;
+        utility::string_t m_connection_id;
+        utility::string_t m_connection_token;
+        utility::string_t m_connection_data;
+        int m_reconnect_window; // in milliseconds
+        int m_reconnect_delay; // in milliseconds
+        utility::string_t m_message_id;
+        utility::string_t m_groups_token;
 
-        connection_impl(const std::string& url, trace_level trace_level, const std::shared_ptr<log_writer>& log_writer,
-            std::function<std::shared_ptr<http_client>(const signalr_client_config&)> http_client_factory, std::function<std::shared_ptr<websocket_client>(const signalr_client_config&)> websocket_factory, const std::string& connection_data, bool skip_negotiation);
+        connection_impl(const utility::string_t& url, const utility::string_t& query_string, trace_level trace_level, const std::shared_ptr<log_writer>& log_writer,
+            std::unique_ptr<web_request_factory> web_request_factory, std::unique_ptr<transport_factory> transport_factory);
 
-        void start_transport(const std::string& url, std::function<void(std::shared_ptr<transport>, std::exception_ptr)> callback);
-        void send_connect_request(const std::shared_ptr<transport>& transport,
-            const std::string& url, std::function<void(std::exception_ptr)> callback);
-        void start_negotiate(const std::string& url, std::function<void(std::exception_ptr)> callback);
-        void start_negotiate_internal(const std::string& url, int redirect_count, std::function<void(std::shared_ptr<transport> transport, std::exception_ptr)> callback);
+        pplx::task<std::shared_ptr<transport>> start_transport(negotiation_response negotiation_response);
+        pplx::task<void> send_connect_request(const std::shared_ptr<transport>& transport, const utility::string_t& connection_token,
+            const pplx::task_completion_event<void>& connect_request_tce);
 
-        void process_response(std::string&& response);
+        void process_response(const utility::string_t& response, const pplx::task_completion_event<void>& connect_request_tce);
 
-        void shutdown(std::function<void(std::exception_ptr)> callback, bool is_dtor = false);
-        void stop_connection(std::exception_ptr);
+        pplx::task<void> shutdown();
+        void reconnect();
+        pplx::task<bool> try_reconnect(const web::uri& reconnect_url, const utility::datetime::interval_type reconnect_start_time,
+            int reconnect_window, int reconnect_delay, pplx::cancellation_token_source disconnect_cts);
 
         bool change_state(connection_state old_state, connection_state new_state);
         connection_state change_state(connection_state new_state);
         void handle_connection_state_change(connection_state old_state, connection_state new_state);
-        void invoke_message_received(std::string&& message);
+        void invoke_message_received(const web::json::value& message);
 
-        static std::string translate_connection_state(connection_state state);
-        void ensure_disconnected(const std::string& error_message) const;
+        static utility::string_t translate_connection_state(connection_state state);
+        void ensure_disconnected(const utility::string_t& error_message);
     };
 }

@@ -1,27 +1,21 @@
-// Licensed to the .NET Foundation under one or more agreements.
-// The .NET Foundation licenses this file to you under the MIT license.
-// See the LICENSE file in the project root for more information.
+// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 #pragma once
 
-#include <vector>
-#include <string>
+#include "cpprest/details/basic_types.h"
 
 namespace signalr
 {
-    struct available_transport
-    {
-        std::string transport;
-        std::vector<std::string> transfer_formats;
-    };
-
     struct negotiation_response
     {
-        std::string connectionId;
-        std::string connectionToken;
-        // std::vector<available_transport> availableTransports;
-        // std::string url;
-        // std::string accessToken;
-        std::string error;
+        utility::string_t connection_id;
+        utility::string_t connection_token;
+        int disconnect_timeout; // in milliseconds
+        int keep_alive_timeout; // in milliseconds
+
+        utility::string_t protocol_version;
+        bool try_websockets;
+        int transport_connect_timeout; // in milliseconds
     };
 }

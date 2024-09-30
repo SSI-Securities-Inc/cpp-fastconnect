@@ -1,0 +1,9 @@
+{
+    "dependencies":[
+        {
+            "name":"cpprestsdk",
+            "default-features":false,
+            "features":["websockets"]
+        }
+    ]
+}

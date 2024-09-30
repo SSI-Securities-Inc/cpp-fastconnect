@@ -1,6 +1,5 @@
-// Licensed to the .NET Foundation under one or more agreements.
-// The .NET Foundation licenses this file to you under the MIT license.
-// See the LICENSE file in the project root for more information.
+// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 #pragma once
 
@@ -13,13 +12,3 @@
 #define SIGNALRCLIENT_API __declspec(dllimport)
 #endif // SIGNALRCLIENT_EXPORTS
 #endif // NO_SIGNALRCLIENT_EXPORTS
-
-#ifndef _WIN32
-#ifndef __cdecl
-#ifdef cdecl
-#define __cdecl __attribute__((cdecl))
-#else
-#define __cdecl
-#endif // cdecl
-#endif // !__cdecl
-#endif // _WIN32

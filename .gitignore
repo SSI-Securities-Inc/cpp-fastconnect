@@ -2,6 +2,7 @@ packages/
 Debug/
 Release/
 out/
+build/
 build.debug/
 build.release/
 .vs/

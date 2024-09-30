@@ -82,6 +82,24 @@
         "codecvt": "cpp",
         "filesystem": "cpp",
         "numeric": "cpp",
-        "valarray": "cpp"
+        "valarray": "cpp",
+        "*.ipp": "cpp",
+        "rope": "cpp",
+        "cstdarg": "cpp",
+        "fstream": "cpp",
+        "random": "cpp",
+        "shared_mutex": "cpp",
+        "source_location": "cpp",
+        "stdfloat": "cpp",
+        "bitset": "cpp",
+        "complex": "cpp",
+        "cwctype": "cpp",
+        "execution": "cpp",
+        "set": "cpp",
+        "stack": "cpp",
+        "strstream": "cpp",
+        "typeindex": "cpp",
+        "variant": "cpp",
+        "memory_resource": "cpp"
     }
 }
