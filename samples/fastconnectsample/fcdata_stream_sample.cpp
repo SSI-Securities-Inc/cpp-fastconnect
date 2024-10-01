@@ -9,8 +9,8 @@
 
 int main()
 {
-	fastconnect::fcdata::api_client client = fastconnect::fcdata::api_client::create("http://192.168.213.98:1189/", "7412da607c354a72b996bc00bf5eb9de", "95bd2765dfb843a6b87be2bddd65b723");
-    fastconnect::fcdata::stream_client stream_client = fastconnect::fcdata::stream_client::create("http://192.168.213.98:1188/", std::make_shared<fastconnect::fcdata::api_client>(client));
+	fastconnect::fcdata::api_client client = fastconnect::fcdata::api_client::create("https://fc-data.ssi.com.vn/", "", "");
+    fastconnect::fcdata::stream_client stream_client = fastconnect::fcdata::stream_client::create("https://fc-datahub.ssi.com.vn/", std::make_shared<fastconnect::fcdata::api_client>(client));
    
 	try
 	{

@@ -11,6 +11,17 @@
                 "CMAKE_BUILD_TYPE": "Debug",
                 "USE_CPPRESTSDK": true
             }
+        },
+        {
+            "name": "vcpkg-relase",
+            "generator": "Visual Studio 17 2022",
+            "binaryDir": "${sourceDir}/build.release",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "WERROR": false,
+                "CMAKE_BUILD_TYPE": "Release",
+                "USE_CPPRESTSDK": true
+            }
         }
     ]
 }

@@ -11,7 +11,7 @@ int main()
 
 	try
 	{
-		fastconnect::fcdata::api_client client = fastconnect::fcdata::api_client::create("http://192.168.213.98:1189/", "7412da607c354a72b996bc00bf5eb9de", "95bd2765dfb843a6b87be2bddd65b723");
+		fastconnect::fcdata::api_client client = fastconnect::fcdata::api_client::create("https://fc-data.ssi.com.vn", "", "");
 		std::cout << "start get access token\n";
 		std::string token = client.get_access_token();
 		std::cout << "token: " << token << std::endl;

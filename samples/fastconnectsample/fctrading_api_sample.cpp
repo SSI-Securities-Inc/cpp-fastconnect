@@ -11,9 +11,16 @@ int main()
 
 	try
 	{
-		fastconnect::fctrading::api_client client = fastconnect::fctrading::api_client::create("http://192.168.213.98:1150/", "31dbfaf1998148de8a09e5822a09f2d2", "aebc3631eda048ca881906827a557d05", "PFJTQUtleVZhbHVlPjxNb2R1bHVzPjZNc2NnWVZrTFh6TUNqTlVOM25PWCtYT0JabVlsUWNsWXFnSGRHdk1iL3JwT3pReUNZQ2RLNHlmUjlBcm5xbjRtS3FLWTNqMGVzK05FeE1UTmJWcGVGbjYzOC9iWU9UL3NzM08zUllyTWVLMExqSEhlVTBjZDZ5YWxIRGVYbE9yUm55dWgvTlNDUUN0cVNLdVZPZmhhc0ZDM0NKTzRTZm9yRHJSc3M0bzc2az08L01vZHVsdXM+PEV4cG9uZW50PkFRQUI8L0V4cG9uZW50PjxQPjlUWFlXQjI3NDdpTmpjc0NPSmVPbzE0V1RhQUhFTmQ4akxtdGNXNlVZdjhSQkVEdnpBOFpRcVd3RzI1dEtJYkkveEhYT1FBSkRRTHBFUFMxcUxlTHFRPT08L1A+PFE+OHdsbGlNdXg0dmNjUmRHcHVMUFYrWnAvN2hYWjlYNXQwWjl2L2plS1o1dHRPeDVDcldUUzduVjQ2WEIwV2xUampBaHQxMm9zZE80UUJ4R2IzT1RFQVE9PTwvUT48RFA+UUNrQ25xdkpDZUMwU1RHaE55V1EwUFpCWjdaRG93aC9NbU16R3NjUVZJYmc4UGY4eHF2OHRBK2VjTThJQ042Ym9RSU9Db0FUM2krd3hCc0RuVTNKWVE9PTwvRFA+PERRPnB6anU4TW5lOHVDK1JsZjFwSTJ3aTlhL2NXejlsRW5TZkNwczM0a05wUzR2WVQ3MzkrQm90Z1NFRm5MMnkvU2V3SXBJTWJEdk4rRlppOU9VMzg5VUFRPT08L0RRPjxJbnZlcnNlUT5vODZSV0tyaXdsUmZHd1hTNzcrRVYxK1M3YU1UNWFtRlJ4S0RaSVd1SnVZRk95YlFHUG1EYjlUYTNkRkMxRUxQVDNVOHVjem1iQlFkZ0QzRGE5SUxEdz09PC9JbnZlcnNlUT48RD5PZVZCeXFpTkdJOEFBODF1TlhuU3JLRHZrdzczRnFFM1dBam9DYmxCbDl2MEkyaEF4WUk2RkhtZHAzT0xWYU42RXlYZTB3eGk2U1F6TnJvNHZkUEhUZEROVkdHanhNNFdJNVZ0NURFQ2cvL0N2dkZRd09saE9nVnJYSmh1RDhjYjZHRHZHUmY4K0hkYlBRZXM3MHNCbWFQSWhvSEp1RExIbnNLWmlERk40QUU9PC9EPjwvUlNBS2V5VmFsdWU+");
+
+		fastconnect::fctrading::api_client client = fastconnect::fctrading::api_client::create("https://fc-tradeapi.ssi.com.vn/" /*https://fc-paperapi.ssi.com.vn*/, "", "", "");
 		std::cout << "start get access token\n";
-		std::string token = client.get_access_token(0, "12345678", true);
+		
+		std::cout <<"Get otp: " << client.get_otp() << "\n";
+
+ 		std::string otp;
+        std::getline(std::cin, otp);
+
+		std::string token = client.get_access_token(1, otp, true);
 		std::cout << "token: " << token << std::endl;
 		const char* order = "{\n"
 			"\"instrumentID\":\"SSI\",\n"
@@ -23,7 +30,7 @@ int main()
 			"\"channelID\":\"TA\",\n"
 			"\"price\":25000,\n"
 			"\"quantity\":100,\n"
-			"\"account\":\"1000011\",\n"
+			"\"account\":\"1234567\",\n"
 			"\"requestID\":\"2\",\n"
 			"\"stopOrder\":false,\n"
 			"\"stopPrice\":0,\n"
@@ -37,6 +44,8 @@ int main()
 			"\"userAgent\":\"string\"\n"
 			"}";
 		std::cout << client.new_order(order) << std::endl;
+		std::cout << "Orderbook: " << client.get_order_book_detail("1234567") << std::endl;
+		std::cout << "Account balance: " << client.get_cash_account_balance("1234567") << std::endl;
 	}
 	catch (const std::exception &ex)
 	{

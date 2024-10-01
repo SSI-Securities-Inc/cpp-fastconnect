@@ -11,14 +11,14 @@ namespace fastconnect
 {
 	namespace fctrading
 	{
-		api_client api_client::create(const std::string& url, const std::string& id, const std::string& secret, const std::string& private_key)
+		api_client api_client::create(const std::string &url, const std::string &id, const std::string &secret, const std::string &private_key)
 		{
 			return api_client(url, id, secret, private_key);
 		}
-		api_client::api_client(const std::string& url, const std::string& id, const std::string& secret, const std::string& private_key)
+		api_client::api_client(const std::string &url, const std::string &id, const std::string &secret, const std::string &private_key)
 			: m_url(url), m_id(id), m_secret(secret), m_private_key(private_key)
 		{
-			if(m_private_key.size() > 0)
+			if (m_private_key.size() > 0)
 				m_rsa = RSA_from_xmlb64(private_key);
 		}
 
@@ -26,9 +26,8 @@ namespace fastconnect
 		{
 		}
 
-		std::string api_client::get_access_token(int twoFAType, const std::string& code, bool save)
+		std::string api_client::get_access_token(int twoFAType, const std::string &code, bool save)
 		{
-
 
 			web::http::client::http_client client(utility::conversions::to_string_t(m_url));
 			web::http::uri_builder builder(U("/api/v2/Trading/AccessToken"));
@@ -57,9 +56,9 @@ namespace fastconnect
 			else
 				throw std::runtime_error(utility::conversions::to_utf8string(json_response.at(U("message")).as_string()));
 		}
-		std::string api_client::sign(const std::string& data)
+		std::string api_client::sign(const std::string &data)
 		{
-			if(m_rsa == NULL)
+			if (m_rsa == NULL)
 				throw std::runtime_error("Private key is not set");
 			// SHA256 digest
 			unsigned char hash[SHA256_DIGEST_LENGTH];
@@ -69,16 +68,82 @@ namespace fastconnect
 			SHA256_Final(hash, &sha256);
 
 			const int size = RSA_size(m_rsa);
-			unsigned char* sign = new unsigned char[size];
+			unsigned char *sign = new unsigned char[size];
 			unsigned int outlen = 0;
 			RSA_sign(NID_sha256, hash, SHA256_DIGEST_LENGTH, sign, &outlen, m_rsa);
 			return to_hex(sign, outlen);
 		}
+		std::string api_client::get_otp()
+		{
+			web::json::value body = web::json::value::object();
+			body[U("consumerID")] = web::json::value(utility::conversions::to_string_t(m_id));
+			body[U("consumerSecret")] = web::json::value(utility::conversions::to_string_t(m_secret));
+			return post(m_url, "/api/v2/Trading/GetOTP",utility::conversions::to_utf8string( body.serialize()));
+		}
 
-		std::string api_client::new_order(const std::string& data) {
+		std::string api_client::new_order(const std::string &data)
+		{
+
 			return post(m_url, "/api/v2/Trading/NewOrder", data);
 		}
-		std::string api_client::post(const std::string& url, const std::string& path, const std::string& body)
+		std::string api_client::cancel_order(const std::string &data)
+		{
+			return post(m_url, "/api/v2/Trading/CancelOrder", data);
+		}
+
+		std::string api_client::modify_order(const std::string &data)
+		{
+			return post(m_url, "/api/v2/Trading/ModifyOrder", data);
+		}
+
+		std::string api_client::derivative_new_order(const std::string &data)
+		{
+
+			return post(m_url, "/api/v2/Trading/derNewOrder", data);
+		}
+		std::string api_client::derivative_cancel_order(const std::string &data)
+		{
+			return post(m_url, "/api/v2/Trading/derCancelOrder", data);
+		}
+
+		std::string api_client::derivative_modify_order(const std::string &data)
+		{
+			return post(m_url, "/api/v2/Trading/derModifyOrder", data);
+		}
+
+		std::string api_client::get_ratelimit()
+		{
+			return get(m_url, "/api/v2/Trading/rateLimit");
+		}
+
+		std::string api_client::get_order_book(const std::string &account)
+		{
+			web::http::uri_builder builder(U("/api/v2/Trading/orderBook"));
+			builder.append_query(U("account"), utility::conversions::to_string_t(account), true);
+			return get(m_url, utility::conversions::to_utf8string(builder.to_string()));
+		}
+
+         std::string api_client::get_order_book_detail(const std::string &account)
+        {
+           web::http::uri_builder builder(U("/api/v2/Trading/auditOrderBook"));
+			builder.append_query(U("account"), utility::conversions::to_string_t(account), true);
+			return get(m_url, utility::conversions::to_utf8string(builder.to_string()));
+        }
+        std::string api_client::get_cash_account_balance(const std::string &account)
+        {
+           web::http::uri_builder builder(U("/api/v2/Trading/cashAcctBal"));
+			builder.append_query(U("account"), utility::conversions::to_string_t(account), true);
+			return get(m_url, utility::conversions::to_utf8string(builder.to_string()));
+        }
+
+        FASTCONNECTCLIENT_API std::string api_client::get_derivative_account_balance(const std::string &account)
+        {
+           web::http::uri_builder builder(U("/api/v2/Trading/derivAcctBal"));
+			builder.append_query(U("account"), utility::conversions::to_string_t(account), true);
+			return get(m_url, utility::conversions::to_utf8string(builder.to_string()));
+        }
+
+        std::string api_client::post(const std::string &url, const std::string &path, const std::string &body)
 		{
 			web::http::client::http_client client(utility::conversions::to_string_t(url));
 			web::http::uri_builder builder(utility::conversions::to_string_t(path));
@@ -88,7 +153,7 @@ namespace fastconnect
 			request.set_request_uri(builder.to_string());
 			web::http::http_headers headers;
 			headers.add(U("Authorization"), utility::conversions::to_string_t("Bearer " + m_access_token));
-			headers.add(U("X-Signature"),utility::conversions::to_string_t(sign(body)));
+			headers.add(U("X-Signature"), utility::conversions::to_string_t(sign(body)));
 			headers.add(U("Content-Type"), U("application/json"));
 			request.headers() = headers;
 			auto response = client.request(request).get();
@@ -96,6 +161,25 @@ namespace fastconnect
 			if (response.status_code() != web::http::status_codes::OK)
 			{
 				throw std::runtime_error("Failed to post " + path);
+			}
+			return response.extract_utf8string().get();
+		}
+
+		std::string api_client::get(const std::string &url, const std::string &path)
+		{
+			web::http::client::http_client client(utility::conversions::to_string_t(url));
+
+			web::http::http_request request(web::http::methods::GET);
+			request.set_request_uri(utility::conversions::to_string_t(path));
+
+			web::http::http_headers headers;
+			headers.add(U("Authorization"), utility::conversions::to_string_t("Bearer " + m_access_token));
+			request.headers() = headers;
+			auto response = client.request(request).get();
+
+			if (response.status_code() != web::http::status_codes::OK)
+			{
+				throw std::runtime_error("Failed to get " + path + ": " + utility::conversions::to_utf8string(response.to_string()));
 			}
 			return response.extract_utf8string().get();
 		}

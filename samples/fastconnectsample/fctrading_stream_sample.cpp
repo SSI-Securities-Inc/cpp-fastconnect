@@ -9,8 +9,8 @@
 
 int main()
 {
-	fastconnect::fctrading::api_client client = fastconnect::fctrading::api_client::create("http://192.168.213.98:1150/", "31dbfaf1998148de8a09e5822a09f2d2", "aebc3631eda048ca881906827a557d05");
-    fastconnect::fctrading::stream_client stream_client = fastconnect::fctrading::stream_client::create("http://192.168.213.98:1151/", std::make_shared<fastconnect::fctrading::api_client>(client));
+	fastconnect::fctrading::api_client client = fastconnect::fctrading::api_client::create("https://fc-tradeapi.ssi.com.vn/", "", "");
+    fastconnect::fctrading::stream_client stream_client = fastconnect::fctrading::stream_client::create("https://fc-tradehub.ssi.com.vn/", std::make_shared<fastconnect::fctrading::api_client>(client));
    
 	try
 	{
